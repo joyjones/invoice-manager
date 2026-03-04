@@ -1,0 +1,13 @@
+{
+  "name": "invoice-manager",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Travel invoice manager with Aliyun OCR",
+  "scripts": {
+    "install:all": "npm --prefix server install && npm --prefix web install",
+    "dev:server": "cd server && npm run dev",
+    "dev:web": "cd web && npm run dev",
+    "start": "cd server && npm run start",
+    "build": "cd web && npm run build"
+  }
+}
