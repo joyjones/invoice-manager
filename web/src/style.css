@@ -59,6 +59,56 @@ body {
   flex-wrap: wrap;
 }
 
+.upload-actions-row {
+  margin-top: 12px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.selected-files-box {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+}
+
+.selected-files-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #1e3a8a;
+}
+
+.selected-files-list {
+  margin: 0;
+  padding-left: 18px;
+  color: #1f2937;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.upload-row .picker-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: none;
+  background: #2563eb;
+  color: #fff;
+  cursor: pointer;
+  user-select: none;
+  font: inherit;
+}
+
+.upload-row .picker-button.ghost {
+  background: #2563eb;
+  color: #fff;
+}
+
 .filters-grid {
   display: grid;
   grid-template-columns: repeat(6, minmax(120px, 1fr));
@@ -73,15 +123,36 @@ body {
   grid-template-columns: 180px minmax(240px, 1fr);
 }
 
-.tab-row {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
+.tab-block {
+  margin-bottom: 16px;
 }
 
-button.active-tab {
-  background: #0f766e;
-  color: #fff;
+.tab-strip {
+  display: flex;
+  gap: 2px;
+  padding: 0 6px;
+  border-bottom: 1px solid #cbd5e1;
+}
+
+.tab-btn {
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 10px 10px 0 0;
+  background: #e2e8f0;
+  color: #334155;
+  padding: 10px 16px;
+}
+
+.tab-btn.active {
+  background: #ffffff;
+  color: #0f766e;
+  border-color: #cbd5e1;
+  font-weight: 600;
+}
+
+.tab-panel {
+  margin-top: 0;
+  border-top-left-radius: 0;
 }
 
 label {
@@ -119,6 +190,11 @@ button.ghost {
   color: #1d4ed8;
 }
 
+button.danger {
+  background: #dc2626;
+  color: #fff;
+}
+
 button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -129,6 +205,20 @@ button:disabled {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.table-sort-btn {
+  background: transparent;
+  color: inherit;
+  border: none;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.table-sort-btn:hover {
+  color: #0f766e;
 }
 
 .table-head {
@@ -153,6 +243,16 @@ td {
   text-align: left;
   padding: 10px 8px;
   font-size: 13px;
+}
+
+.checkbox-col {
+  width: 44px;
+  text-align: center;
+}
+
+.checkbox-col input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
 }
 
 th {
@@ -212,6 +312,67 @@ th {
   font-size: 12px;
 }
 
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 1000;
+}
+
+.modal-card {
+  width: min(860px, 96vw);
+  max-height: 88vh;
+  overflow: auto;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.22);
+}
+
+.modal-card h3 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.modal-fields {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modal-field span {
+  font-size: 12px;
+  color: #475569;
+}
+
+.modal-actions {
+  margin-top: 14px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.simple-modal {
+  width: min(520px, 96vw);
+}
+
+.checkbox-field {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
 @media (max-width: 900px) {
   .page {
     padding: 14px;
@@ -228,4 +389,5 @@ th {
   .two-col {
     grid-template-columns: 1fr;
   }
+
 }

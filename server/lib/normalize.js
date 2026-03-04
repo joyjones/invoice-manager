@@ -273,6 +273,69 @@ function inferDocSubType(text, sourceType = '') {
   return 'UNKNOWN';
 }
 
+const REGION_NAME_PAIRS = [
+  ['北京市', ['北京']],
+  ['上海市', ['上海']],
+  ['天津市', ['天津']],
+  ['重庆市', ['重庆']],
+  ['河北省', ['河北', '石家庄', '唐山', '保定']],
+  ['山西省', ['山西', '太原', '大同']],
+  ['内蒙古自治区', ['内蒙古', '呼和浩特', '包头']],
+  ['辽宁省', ['辽宁', '沈阳', '大连']],
+  ['吉林省', ['吉林', '长春']],
+  ['黑龙江省', ['黑龙江', '哈尔滨']],
+  ['江苏省', ['江苏', '南京', '苏州', '无锡']],
+  ['浙江省', ['浙江', '杭州', '宁波', '温州']],
+  ['安徽省', ['安徽', '合肥']],
+  ['福建省', ['福建', '福州', '厦门', '泉州']],
+  ['江西省', ['江西', '南昌']],
+  ['山东省', ['山东', '济南', '青岛']],
+  ['河南省', ['河南', '郑州', '洛阳']],
+  ['湖北省', ['湖北', '武汉']],
+  ['湖南省', ['湖南', '长沙']],
+  ['广东省', ['广东', '广州', '深圳', '佛山', '东莞']],
+  ['广西壮族自治区', ['广西', '南宁', '桂林']],
+  ['海南省', ['海南', '海口', '三亚']],
+  ['四川省', ['四川', '成都']],
+  ['贵州省', ['贵州', '贵阳']],
+  ['云南省', ['云南', '昆明']],
+  ['西藏自治区', ['西藏', '拉萨']],
+  ['陕西省', ['陕西', '西安']],
+  ['甘肃省', ['甘肃', '兰州']],
+  ['青海省', ['青海', '西宁']],
+  ['宁夏回族自治区', ['宁夏', '银川']],
+  ['新疆维吾尔自治区', ['新疆', '乌鲁木齐']],
+  ['香港特别行政区', ['香港']],
+  ['澳门特别行政区', ['澳门']],
+  ['台湾省', ['台湾', '台北']],
+];
+
+function mergeRouteToWithTransport(routeTo, transportNo) {
+  const routeValue = `${routeTo || ''}`.trim();
+  const transportValue = `${transportNo || ''}`.trim();
+  if (!transportValue) return routeValue;
+  if (!routeValue) return transportValue;
+  if (routeValue.includes(transportValue)) return routeValue;
+  return `${routeValue}（${transportValue}）`;
+}
+
+function inferOccurredRegion(text = '') {
+  const source = `${text || ''}`;
+  const directMatch = source.match(
+    /(北京市|上海市|天津市|重庆市|香港特别行政区|澳门特别行政区|广西壮族自治区|内蒙古自治区|宁夏回族自治区|新疆维吾尔自治区|西藏自治区|[\u4e00-\u9fa5]{2,10}(?:省|市))/,
+  );
+  if (directMatch?.[1]) {
+    return directMatch[1];
+  }
+
+  for (const [regionName, keywords] of REGION_NAME_PAIRS) {
+    if (keywords.some((keyword) => source.includes(keyword))) {
+      return regionName;
+    }
+  }
+  return '';
+}
+
 function collectCommonFields(root) {
   const detailsCandidate = pickFirstNonEmptyArray([
     root?.invoiceDetails,
@@ -312,6 +375,11 @@ function collectCommonFields(root) {
 
   const taxAmount = pickNumberFromKeys(root, ['invoiceTax', 'tax', 'taxAmount']);
 
+  const routeFrom = firstNonEmpty(root, ['fromStation', 'departureStation', 'startStation', 'from', 'startPlace']);
+  const routeTo = firstNonEmpty(root, ['toStation', 'arrivalStation', 'endStation', 'to', 'endPlace']);
+  const transportNo = firstNonEmpty(root, ['trainNumber', 'flightNo', 'vehicleNo', 'busNo', 'transportNo', 'carType']);
+  const mergedRouteTo = mergeRouteToWithTransport(routeTo, transportNo);
+
   const common = {
     title,
     invoiceType: firstNonEmpty(root, ['invoiceType', 'title', 'invoiceKind', 'type']) || '未识别类型',
@@ -328,10 +396,9 @@ function collectCommonFields(root) {
     sellerTaxNumber: firstNonEmpty(root, ['sellerTaxNumber', 'sellerCode', 'sellerTaxNo']),
     purchaserName: firstNonEmpty(root, ['purchaserName', 'buyerName']),
     purchaserTaxNumber: firstNonEmpty(root, ['purchaserTaxNumber', 'buyerTaxNo']),
-    routeFrom: firstNonEmpty(root, ['fromStation', 'departureStation', 'startStation', 'from', 'startPlace']),
-    routeTo: firstNonEmpty(root, ['toStation', 'arrivalStation', 'endStation', 'to', 'endPlace']),
+    routeFrom,
+    routeTo: mergedRouteTo,
     travelerName: firstNonEmpty(root, ['passengerName', 'travelerName', 'name']),
-    transportNo: firstNonEmpty(root, ['trainNumber', 'flightNo', 'vehicleNo', 'busNo', 'transportNo', 'carType']),
     seatClass: firstNonEmpty(root, ['seatClass', 'seatNo', 'seatType']),
   };
 
@@ -347,6 +414,14 @@ function collectCommonFields(root) {
 
   common.expenseCategory = inferExpenseCategory(expenseHint);
   common.docSubType = inferDocSubType(expenseHint);
+  common.occurredRegion = inferOccurredRegion([
+    common.title,
+    common.invoiceType,
+    common.sellerName,
+    common.routeFrom,
+    common.routeTo,
+    firstNonEmpty(root, ['address', 'city', 'province', 'region', 'sellerAddress', 'buyerAddress']),
+  ].filter(Boolean).join(' '));
   return common;
 }
 
@@ -390,7 +465,8 @@ function buildEntriesFromCommon({ common, root, documentId, sourceIndex, created
     routeFrom: common.routeFrom,
     routeTo: common.routeTo,
     travelerName: common.travelerName,
-    transportNo: common.transportNo,
+    selfPaid: true,
+    occurredRegion: common.occurredRegion || '',
     seatClass: common.seatClass,
   };
 
@@ -512,7 +588,7 @@ function normalizeRecognizedDocument({
     routeFrom: '',
     routeTo: '',
     travelerName: '',
-    transportNo: '',
+    occurredRegion: '',
     seatClass: '',
     expenseCategory: '其他',
     docSubType: 'UNKNOWN',
@@ -566,7 +642,7 @@ function normalizeRecognizedDocument({
       routeFrom: firstCommon.routeFrom,
       routeTo: firstCommon.routeTo,
       travelerName: firstCommon.travelerName,
-      transportNo: firstCommon.transportNo,
+      occurredRegion: firstCommon.occurredRegion,
       seatClass: firstCommon.seatClass,
       expenseCategory: firstCommon.expenseCategory,
     },
@@ -615,7 +691,7 @@ function normalizeDocxSummary({
       routeFrom: '',
       routeTo: '',
       travelerName: '',
-      transportNo: '',
+      occurredRegion: '',
       seatClass: '',
       expenseCategory,
     },

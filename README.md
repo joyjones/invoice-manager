@@ -29,7 +29,7 @@ nvm use 22
 后端环境变量在 `server/.env`：
 
 ```env
-PORT=3000
+PORT=3001
 LOG_LEVEL=info
 ALIYUN_REGION_ID=cn-hangzhou
 ALIYUN_OCR_ENDPOINT=ocr-api.cn-hangzhou.aliyuncs.com
@@ -71,7 +71,7 @@ npm run dev
 4. 访问页面
 
 - 前端：`http://localhost:5173`
-- 后端：`http://localhost:3000`
+- 后端：`http://localhost:3001`
 
 也可以在仓库根目录直接执行：
 
