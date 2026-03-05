@@ -1,7 +1,7 @@
 ﻿
 <script setup>
 import dayjs from 'dayjs'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   createManualEntry,
   deleteEntries,
@@ -10,6 +10,7 @@ import {
   fetchExpenseCategories,
   fetchInvoiceTypes,
   fetchOcrJobs,
+  fetchUploadProgress,
   updateEntriesRegion,
   updateEntry,
   uploadDocuments,
@@ -79,6 +80,23 @@ const invoiceExtensions = new Set(['.pdf', '.jpg', '.jpeg', '.png', '.webp', '.b
 const uploadBatchSize = 50
 const selectedSource = ref('')
 const selectedDirectoryName = ref('')
+const uploadProgress = ref({
+  active: false,
+  taskId: '',
+  currentBatch: 0,
+  completedBatches: 0,
+  totalBatches: 0,
+  processedFiles: 0,
+  totalFiles: 0,
+  successCount: 0,
+  ignoredCount: 0,
+  failedCount: 0,
+  currentFileName: '',
+  phase: '',
+})
+const UPLOAD_PROGRESS_STORAGE_KEY = 'invoice-upload-progress-context'
+const UPLOAD_PROGRESS_POLL_INTERVAL_MS = 1200
+let uploadProgressPollTimer = null
 
 const editFieldDefs = [
   { key: 'createdAt', label: '上传时间', type: 'datetime-local' },
@@ -147,6 +165,26 @@ const selectedUploadSummary = computed(() => {
 })
 const selectedUploadFiles = computed(() => files.value.slice(0, 8).map((file) => file.webkitRelativePath || file.name))
 const hasMoreSelectedFiles = computed(() => files.value.length > 8)
+const uploadProgressPercent = computed(() => {
+  const total = Number(uploadProgress.value.totalFiles || 0)
+  const processed = Number(uploadProgress.value.processedFiles || 0)
+  if (!total) return 0
+  return Math.max(0, Math.min(100, Math.round((processed / total) * 100)))
+})
+const uploadProgressText = computed(() => {
+  if (!uploadProgress.value.active) return ''
+  const {
+    processedFiles,
+    totalFiles,
+    successCount,
+    ignoredCount,
+    failedCount,
+    currentFileName,
+  } = uploadProgress.value
+  const countText = `已处理 ${processedFiles}/${totalFiles}，成功 ${successCount}，忽略 ${ignoredCount}，失败 ${failedCount}`
+  const fileText = currentFileName ? `，当前：${currentFileName}` : ''
+  return `正在处理：${countText}${fileText}`
+})
 
 function getDirectoryName(fileList = []) {
   const first = fileList.find((item) => item?.webkitRelativePath)
@@ -159,6 +197,94 @@ function clearUploadInputs() {
   const directoryInput = document.getElementById('invoice-directory')
   if (fileInput) fileInput.value = ''
   if (directoryInput) directoryInput.value = ''
+}
+
+function saveUploadProgressContext(context) {
+  try {
+    localStorage.setItem(UPLOAD_PROGRESS_STORAGE_KEY, JSON.stringify(context || {}))
+  } catch {
+    // ignore localStorage errors
+  }
+}
+
+function readUploadProgressContext() {
+  try {
+    const raw = localStorage.getItem(UPLOAD_PROGRESS_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function clearUploadProgressContext() {
+  try {
+    localStorage.removeItem(UPLOAD_PROGRESS_STORAGE_KEY)
+  } catch {
+    // ignore localStorage errors
+  }
+}
+
+function stopUploadProgressPolling() {
+  if (uploadProgressPollTimer) {
+    clearInterval(uploadProgressPollTimer)
+    uploadProgressPollTimer = null
+  }
+}
+
+function applyUploadProgress(task = {}) {
+  const status = `${task.status || ''}`.toUpperCase()
+  const totalFileCount = Number(task.totalFileCount || 0)
+  const processedCount = Number(task.processedCount || 0)
+  const active = status === 'PROCESSING'
+
+  uploadProgress.value = {
+    active,
+    taskId: `${task.taskId || uploadProgress.value.taskId || ''}`,
+    currentBatch: Number(task.currentFileIndex || 0),
+    completedBatches: 0,
+    totalBatches: totalFileCount,
+    processedFiles: processedCount,
+    totalFiles: totalFileCount,
+    successCount: Number(task.successCount || 0),
+    ignoredCount: Number(task.ignoredCount || 0),
+    failedCount: Number(task.failedCount || 0),
+    currentFileName: `${task.currentFileName || ''}`,
+    phase: active ? 'processing' : 'completed',
+  }
+  isUploading.value = active
+}
+
+async function syncUploadProgress(taskId, { silentNotFound = false } = {}) {
+  if (!taskId) return null
+  try {
+    const task = await fetchUploadProgress(taskId)
+    applyUploadProgress(task)
+    if (`${task.status || ''}`.toUpperCase() !== 'PROCESSING') {
+      const failedCount = Number(task.failedCount || 0)
+      messageType.value = failedCount > 0 ? 'error' : 'success'
+      if (`${task.message || ''}`.trim()) {
+        message.value = `${task.message}`
+      }
+      stopUploadProgressPolling()
+      clearUploadProgressContext()
+    }
+    return task
+  } catch (err) {
+    if (err?.response?.status === 404 && silentNotFound) {
+      return null
+    }
+    throw err
+  }
+}
+
+function startUploadProgressPolling(taskId) {
+  if (!taskId) return
+  stopUploadProgressPolling()
+  uploadProgressPollTimer = setInterval(() => {
+    syncUploadProgress(taskId, { silentNotFound: true }).catch(() => {})
+  }, UPLOAD_PROGRESS_POLL_INTERVAL_MS)
 }
 
 function onSelectFiles(event) {
@@ -502,17 +628,39 @@ async function submitUpload() {
   isUploading.value = true
   errorMessage.value = ''
   message.value = ''
+  const uploadTaskId = `upload_${Date.now()}_${Math.round(Math.random() * 1e9)}`
+  uploadProgress.value = {
+    active: true,
+    taskId: uploadTaskId,
+    currentBatch: 0,
+    completedBatches: 0,
+    totalBatches: 0,
+    processedFiles: 0,
+    totalFiles: uploadable.length,
+    successCount: 0,
+    ignoredCount: 0,
+    failedCount: 0,
+    currentFileName: '',
+    phase: 'processing',
+  }
+  saveUploadProgressContext({
+    taskId: uploadTaskId,
+    totalFiles: uploadable.length,
+    startedAt: new Date().toISOString(),
+  })
+  startUploadProgressPolling(uploadTaskId)
+  await syncUploadProgress(uploadTaskId, { silentNotFound: true }).catch(() => {})
 
   try {
     const result = await uploadDocuments(uploadable, {
       batchSize: uploadBatchSize,
-      onProgress(progress) {
-        if (progress.totalBatches > 1) {
-          messageType.value = 'success'
-          message.value = `正在导入：第 ${progress.completedBatches}/${progress.totalBatches} 批（${progress.uploadedFiles}/${progress.totalFiles}）`
-        }
-      },
+      uploadTaskId,
     })
+    await syncUploadProgress(result?.uploadTaskId || uploadTaskId, { silentNotFound: true }).catch(() => {})
+    stopUploadProgressPolling()
+    clearUploadProgressContext()
+    uploadProgress.value.active = false
+    isUploading.value = false
 
     const selectedCount = files.value.length
     const successCount = Number(result?.successCount || 0)
@@ -536,10 +684,19 @@ async function submitUpload() {
     clearUploadInputs()
     await refreshAll()
   } catch (err) {
+    const runningTask = await syncUploadProgress(uploadTaskId, { silentNotFound: true }).catch(() => null)
+    if (runningTask && `${runningTask.status || ''}`.toUpperCase() === 'PROCESSING') {
+      messageType.value = 'success'
+      message.value = '上传请求连接中断，但后端仍在处理，请等待进度完成。'
+      startUploadProgressPolling(uploadTaskId)
+      return
+    }
+    stopUploadProgressPolling()
+    clearUploadProgressContext()
+    uploadProgress.value.active = false
+    isUploading.value = false
     const trace = err?.response?.data?.traceId ? ` traceId=${err.response.data.traceId}` : ''
     errorMessage.value = `${resolveApiError(err, '上传失败')}${trace}`
-  } finally {
-    isUploading.value = false
   }
 }
 
@@ -621,6 +778,26 @@ async function changeJobPage(nextPage) {
 
 onMounted(async () => {
   await refreshAll()
+  const cachedTask = readUploadProgressContext()
+  const taskId = `${cachedTask?.taskId || ''}`.trim()
+  if (taskId) {
+    uploadProgress.value = {
+      ...uploadProgress.value,
+      active: true,
+      taskId,
+      totalFiles: Number(cachedTask?.totalFiles || 0),
+      phase: 'processing',
+    }
+    isUploading.value = true
+    await syncUploadProgress(taskId, { silentNotFound: true }).catch(() => {})
+    if (uploadProgress.value.active) {
+      startUploadProgressPolling(taskId)
+    }
+  }
+})
+
+onBeforeUnmount(() => {
+  stopUploadProgressPolling()
 })
 </script>
 
@@ -634,15 +811,21 @@ onMounted(async () => {
     <section class="panel upload-panel">
       <h2>上传票据</h2>
       <div class="upload-row">
-        <label class="picker-button">选择文件
-          <input id="invoice-files" class="hidden-file-input" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,.bmp" @change="onSelectFiles" />
+        <label :class="isUploading ? 'picker-button disabled' : 'picker-button'">选择文件
+          <input id="invoice-files" class="hidden-file-input" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,.bmp" :disabled="isUploading" @change="onSelectFiles" />
         </label>
-        <label class="picker-button">选择目录
-          <input id="invoice-directory" class="hidden-file-input" type="file" webkitdirectory directory multiple @change="onSelectDirectory" />
+        <label :class="isUploading ? 'picker-button disabled' : 'picker-button'">选择目录
+          <input id="invoice-directory" class="hidden-file-input" type="file" webkitdirectory directory multiple :disabled="isUploading" @change="onSelectDirectory" />
         </label>
       </div>
       <div class="upload-actions-row">
         <button :disabled="isUploading || !files.length" @click="submitUpload">{{ isUploading ? '处理中...' : (selectedSource === 'directory' ? '导入目录' : '上传票据') }}</button>
+      </div>
+      <div v-if="isUploading && uploadProgress.active" class="upload-progress">
+        <p class="upload-progress-text">{{ uploadProgressText }}</p>
+        <div class="upload-progress-track">
+          <div class="upload-progress-bar" :style="{ width: `${uploadProgressPercent}%` }"></div>
+        </div>
       </div>
       <div v-if="files.length" class="selected-files-box">
         <p class="selected-files-title">{{ selectedUploadSummary }}</p>

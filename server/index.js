@@ -44,6 +44,74 @@ const allowedMimeTypes = new Set([
   'application/octet-stream',
 ]);
 
+const UPLOAD_PROGRESS_TTL_MS = 12 * 60 * 60 * 1000;
+const uploadProgressStore = new Map();
+
+function sanitizeUploadTaskId(value = '') {
+  const normalized = `${value || ''}`.trim();
+  if (!normalized) return '';
+  if (!/^[a-zA-Z0-9_-]{8,100}$/.test(normalized)) return '';
+  return normalized;
+}
+
+function cleanupExpiredUploadTasks() {
+  const now = Date.now();
+  for (const [taskId, task] of uploadProgressStore.entries()) {
+    const updatedAt = Date.parse(task?.updatedAt || task?.startedAt || '');
+    if (!Number.isFinite(updatedAt)) continue;
+    if (now - updatedAt > UPLOAD_PROGRESS_TTL_MS) {
+      uploadProgressStore.delete(taskId);
+    }
+  }
+}
+
+function createUploadTask(taskId, totalFileCount = 0) {
+  cleanupExpiredUploadTasks();
+  const now = new Date().toISOString();
+  const task = {
+    taskId,
+    status: 'PROCESSING',
+    totalFileCount: Number(totalFileCount) || 0,
+    processedCount: 0,
+    successCount: 0,
+    ignoredCount: 0,
+    failedCount: 0,
+    currentFileIndex: 0,
+    currentFileName: '',
+    message: '',
+    startedAt: now,
+    updatedAt: now,
+    completedAt: '',
+  };
+  uploadProgressStore.set(taskId, task);
+  return task;
+}
+
+function updateUploadTask(taskId, patch = {}) {
+  const existing = uploadProgressStore.get(taskId);
+  if (!existing) return null;
+  const next = {
+    ...existing,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  uploadProgressStore.set(taskId, next);
+  return next;
+}
+
+function completeUploadTask(taskId, patch = {}) {
+  return updateUploadTask(taskId, {
+    status: 'COMPLETED',
+    completedAt: new Date().toISOString(),
+    ...patch,
+  });
+}
+
+function getUploadTask(taskId) {
+  cleanupExpiredUploadTasks();
+  return uploadProgressStore.get(taskId) || null;
+}
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use('/uploads', express.static(UPLOAD_DIR));
@@ -144,6 +212,20 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+app.get('/api/uploads/progress/:taskId', (req, res) => {
+  const taskId = sanitizeUploadTaskId(req.params?.taskId || '');
+  if (!taskId) {
+    res.status(400).json({ message: '上传任务ID无效', traceId: req.traceId || '' });
+    return;
+  }
+  const task = getUploadTask(taskId);
+  if (!task) {
+    res.status(404).json({ message: '未找到上传任务', traceId: req.traceId || '' });
+    return;
+  }
+  res.json(task);
+});
+
 async function handleUpload(req, res) {
   const files = req.files || [];
   const log = (req.logger || appLogger).child({
@@ -157,6 +239,10 @@ async function handleUpload(req, res) {
     return;
   }
 
+  const headerTaskId = sanitizeUploadTaskId(req.get('x-upload-task-id') || '');
+  const uploadTaskId = headerTaskId || crypto.randomUUID();
+  createUploadTask(uploadTaskId, files.length);
+
   log.info('开始处理上传文件');
 
   const documents = [];
@@ -164,9 +250,14 @@ async function handleUpload(req, res) {
   const ignoredFiles = [];
   const failedFiles = [];
 
-  for (const file of files) {
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
     const originalName = normalizeUploadedFileName(file.originalname);
     const fileLog = log.child({ fileName: originalName, size: file.size, mimeType: file.mimetype });
+    updateUploadTask(uploadTaskId, {
+      currentFileIndex: index + 1,
+      currentFileName: originalName,
+    });
 
     try {
       const result = await processStoredFile({
@@ -185,6 +276,12 @@ async function handleUpload(req, res) {
         failedFiles.push({ fileName: originalName, reason });
         safeUnlink(file.path);
         fileLog.warn('文件识别失败，未导入', { reason });
+        updateUploadTask(uploadTaskId, {
+          processedCount: documents.length + ignoredFiles.length + failedFiles.length,
+          successCount: documents.length,
+          ignoredCount: ignoredFiles.length,
+          failedCount: failedFiles.length,
+        });
         continue;
       }
 
@@ -196,6 +293,12 @@ async function handleUpload(req, res) {
           docCategory: result.document.docCategory,
           docSubType: result.document.docSubType,
         });
+        updateUploadTask(uploadTaskId, {
+          processedCount: documents.length + ignoredFiles.length + failedFiles.length,
+          successCount: documents.length,
+          ignoredCount: ignoredFiles.length,
+          failedCount: failedFiles.length,
+        });
         continue;
       }
 
@@ -204,6 +307,12 @@ async function handleUpload(req, res) {
         ignoredFiles.push({ fileName: originalName, reason });
         safeUnlink(file.path);
         fileLog.warn('发票未抽取到条目，已忽略', { reason });
+        updateUploadTask(uploadTaskId, {
+          processedCount: documents.length + ignoredFiles.length + failedFiles.length,
+          successCount: documents.length,
+          ignoredCount: ignoredFiles.length,
+          failedCount: failedFiles.length,
+        });
         continue;
       }
 
@@ -216,12 +325,24 @@ async function handleUpload(req, res) {
         docCategory: result.document.docCategory,
         entryCount: result.entries.length,
       });
+      updateUploadTask(uploadTaskId, {
+        processedCount: documents.length + ignoredFiles.length + failedFiles.length,
+        successCount: documents.length,
+        ignoredCount: ignoredFiles.length,
+        failedCount: failedFiles.length,
+      });
     } catch (error) {
       const reason = error instanceof Error ? error.message : `${error || '处理异常'}`;
       failedFiles.push({ fileName: originalName, reason });
       safeUnlink(file.path);
       fileLog.error('上传文件处理异常', {
         error: normalizeError(error),
+      });
+      updateUploadTask(uploadTaskId, {
+        processedCount: documents.length + ignoredFiles.length + failedFiles.length,
+        successCount: documents.length,
+        ignoredCount: ignoredFiles.length,
+        failedCount: failedFiles.length,
       });
     }
   }
@@ -230,9 +351,21 @@ async function handleUpload(req, res) {
   const ignoredCount = ignoredFiles.length;
   const failedCount = failedFiles.length;
 
+  const finalMessage = `处理完成，共 ${files.length} 个文件，成功导入 ${successCount} 个发票，忽略非发票 ${ignoredCount} 个，失败 ${failedCount} 个`;
+  completeUploadTask(uploadTaskId, {
+    processedCount: files.length,
+    successCount,
+    ignoredCount,
+    failedCount,
+    currentFileIndex: files.length,
+    currentFileName: '',
+    message: finalMessage,
+  });
+
   res.json({
-    message: `处理完成，共 ${files.length} 个文件，成功导入 ${successCount} 个发票，忽略非发票 ${ignoredCount} 个，失败 ${failedCount} 个`,
+    message: finalMessage,
     traceId: req.traceId,
+    uploadTaskId,
     totalFileCount: files.length,
     successCount,
     failedCount,
