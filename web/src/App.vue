@@ -17,6 +17,9 @@ import {
 } from './api'
 
 const now = dayjs()
+const APP_NAME = __APP_NAME__
+const APP_VERSION = __APP_VERSION__
+const APP_TITLE = `${APP_NAME} ${APP_VERSION}`
 const activeTab = ref('entries')
 const files = ref([])
 const isUploading = ref(false)
@@ -777,6 +780,7 @@ async function changeJobPage(nextPage) {
 }
 
 onMounted(async () => {
+  document.title = APP_TITLE
   await refreshAll()
   const cachedTask = readUploadProgressContext()
   const taskId = `${cachedTask?.taskId || ''}`.trim()
@@ -804,7 +808,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="page">
     <header class="hero">
-      <h1>差旅票据管理器（静姐专用版）</h1>
+      <h1>{{ APP_TITLE }}</h1>
       <p>你的差旅票据管家</p>
     </header>
 
