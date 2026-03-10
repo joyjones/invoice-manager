@@ -5,6 +5,24 @@ import TeaUtil from '@alicloud/tea-util';
 import { createLogger, normalizeError } from './logger.js';
 
 let cachedClient = null;
+const OCR_MAX_SAFE_ATTEMPTS = 3;
+const OCR_MAX_SAFE_ACTION_RETRIES = 3;
+
+function toBoundedInteger(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.floor(parsed)));
+}
+
+function readBooleanEnv(name, fallback) {
+  const value = `${process.env[name] || ''}`.trim().toLowerCase();
+  if (!value) return fallback;
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  return fallback;
+}
 
 function getOcrClient() {
   if (cachedClient) {
@@ -70,16 +88,30 @@ function readResponseMessage(response) {
   return response?.body?.message || '';
 }
 
-function getRuntimeOptions() {
-  const connectTimeout = Number(process.env.OCR_CONNECT_TIMEOUT_MS || 10000);
-  const readTimeout = Number(process.env.OCR_READ_TIMEOUT_MS || 20000);
-  const maxAttempts = Number(process.env.OCR_MAX_ATTEMPTS || 2);
-  return new TeaUtil.RuntimeOptions({
+function getRuntimeConfig() {
+  const connectTimeout = toBoundedInteger(process.env.OCR_CONNECT_TIMEOUT_MS, 10000, 1000, 120000);
+  const readTimeout = toBoundedInteger(process.env.OCR_READ_TIMEOUT_MS, 20000, 1000, 180000);
+  const maxAttempts = toBoundedInteger(
+    process.env.OCR_MAX_ATTEMPTS,
+    1,
+    1,
+    OCR_MAX_SAFE_ATTEMPTS,
+  );
+  return {
     connectTimeout,
     readTimeout,
-    autoretry: maxAttempts > 1,
     maxAttempts,
-  });
+    options: new TeaUtil.RuntimeOptions({
+      connectTimeout,
+      readTimeout,
+      autoretry: maxAttempts > 1,
+      maxAttempts,
+    }),
+  };
+}
+
+function getActionRetries() {
+  return toBoundedInteger(process.env.OCR_ACTION_RETRIES, 1, 1, OCR_MAX_SAFE_ACTION_RETRIES);
 }
 
 function isRetryableMessage(message = '') {
@@ -100,12 +132,12 @@ function responseToAction(name, response, elapsedMs) {
   };
 }
 
-async function runAction({ name, execute, log }) {
+async function runAction({ name, execute, log, retries }) {
   const startedAt = Date.now();
-  const retries = Math.max(1, Number(process.env.OCR_ACTION_RETRIES || 2));
+  const attempts = Math.max(1, retries);
 
   let lastError = null;
-  for (let attempt = 1; attempt <= retries; attempt += 1) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       const response = await execute();
       const action = responseToAction(name, response, Date.now() - startedAt);
@@ -122,11 +154,11 @@ async function runAction({ name, execute, log }) {
       lastError = error;
       log.warn(`${name} 调用异常`, {
         attempt,
-        retries,
+        retries: attempts,
         retryable,
         error: normalizeError(error),
       });
-      if (!retryable || attempt >= retries) {
+      if (!retryable || attempt >= attempts) {
         break;
       }
     }
@@ -143,7 +175,7 @@ async function runAction({ name, execute, log }) {
       hasData: false,
       elapsedMs: Date.now() - startedAt,
       error: normalizeError(lastError),
-      attempt: retries,
+      attempt: attempts,
     },
     response: null,
     error: lastError,
@@ -153,18 +185,31 @@ async function runAction({ name, execute, log }) {
 async function recognizeDocumentFromFile(filePath, context = {}) {
   const log = createLogger('ocr', context);
   const client = getOcrClient();
+  const runtimeConfig = getRuntimeConfig();
+  const actionRetries = getActionRetries();
+  const enableInvoiceFallback = readBooleanEnv('OCR_ENABLE_INVOICE_FALLBACK', true);
+  const enableAllTextFallback = readBooleanEnv('OCR_ENABLE_ALL_TEXT_FALLBACK', false);
 
   log.info('开始 OCR 识别', { filePath });
+  log.info('OCR 策略配置', {
+    actionRetries,
+    runtimeMaxAttempts: runtimeConfig.maxAttempts,
+    connectTimeout: runtimeConfig.connectTimeout,
+    readTimeout: runtimeConfig.readTimeout,
+    enableInvoiceFallback,
+    enableAllTextFallback,
+  });
   const actions = [];
 
   const mixed = await runAction({
     name: 'RecognizeMixedInvoices',
+    retries: actionRetries,
     execute: () => {
       const request = new OCRApi.RecognizeMixedInvoicesRequest({
         body: fs.createReadStream(filePath),
         mergePdfPages: true,
       });
-      return client.recognizeMixedInvoicesWithOptions(request, getRuntimeOptions());
+      return client.recognizeMixedInvoicesWithOptions(request, runtimeConfig.options);
     },
     log,
   });
@@ -181,51 +226,61 @@ async function recognizeDocumentFromFile(filePath, context = {}) {
     };
   }
 
-  const invoice = await runAction({
-    name: 'RecognizeInvoice',
-    execute: () => {
-      const request = new OCRApi.RecognizeInvoiceRequest({
-        body: fs.createReadStream(filePath),
-      });
-      return client.recognizeInvoiceWithOptions(request, getRuntimeOptions());
-    },
-    log,
-  });
-  actions.push(invoice.action);
-  if (invoice.ok) {
-    return {
-      success: true,
-      usedAction: invoice.action.name,
-      providerRequestId: invoice.action.requestId,
-      providerCode: invoice.action.providerCode,
-      providerMessage: invoice.action.message,
-      raw: parseData(invoice.response?.body?.data),
-      actions,
-    };
+  if (enableInvoiceFallback) {
+    const invoice = await runAction({
+      name: 'RecognizeInvoice',
+      retries: actionRetries,
+      execute: () => {
+        const request = new OCRApi.RecognizeInvoiceRequest({
+          body: fs.createReadStream(filePath),
+        });
+        return client.recognizeInvoiceWithOptions(request, runtimeConfig.options);
+      },
+      log,
+    });
+    actions.push(invoice.action);
+    if (invoice.ok) {
+      return {
+        success: true,
+        usedAction: invoice.action.name,
+        providerRequestId: invoice.action.requestId,
+        providerCode: invoice.action.providerCode,
+        providerMessage: invoice.action.message,
+        raw: parseData(invoice.response?.body?.data),
+        actions,
+      };
+    }
+  } else {
+    log.warn('RecognizeInvoice 兜底已关闭');
   }
 
-  const allText = await runAction({
-    name: 'RecognizeAllText',
-    execute: () => {
-      const request = new OCRApi.RecognizeAllTextRequest({
-        type: 'Advanced',
-        body: fs.createReadStream(filePath),
-      });
-      return client.recognizeAllTextWithOptions(request, getRuntimeOptions());
-    },
-    log,
-  });
-  actions.push(allText.action);
-  if (allText.ok) {
-    return {
-      success: true,
-      usedAction: allText.action.name,
-      providerRequestId: allText.action.requestId,
-      providerCode: allText.action.providerCode,
-      providerMessage: allText.action.message,
-      raw: parseData(allText.response?.body?.data),
-      actions,
-    };
+  if (enableAllTextFallback) {
+    const allText = await runAction({
+      name: 'RecognizeAllText',
+      retries: actionRetries,
+      execute: () => {
+        const request = new OCRApi.RecognizeAllTextRequest({
+          type: 'Advanced',
+          body: fs.createReadStream(filePath),
+        });
+        return client.recognizeAllTextWithOptions(request, runtimeConfig.options);
+      },
+      log,
+    });
+    actions.push(allText.action);
+    if (allText.ok) {
+      return {
+        success: true,
+        usedAction: allText.action.name,
+        providerRequestId: allText.action.requestId,
+        providerCode: allText.action.providerCode,
+        providerMessage: allText.action.message,
+        raw: parseData(allText.response?.body?.data),
+        actions,
+      };
+    }
+  } else {
+    log.warn('RecognizeAllText 兜底已关闭');
   }
 
   const lastAction = actions[actions.length - 1] || null;

@@ -31,6 +31,12 @@ nvm use 22
 ```env
 PORT=3001
 LOG_LEVEL=info
+OCR_CONNECT_TIMEOUT_MS=10000
+OCR_READ_TIMEOUT_MS=20000
+OCR_MAX_ATTEMPTS=1
+OCR_ACTION_RETRIES=1
+OCR_ENABLE_INVOICE_FALLBACK=true
+OCR_ENABLE_ALL_TEXT_FALLBACK=false
 ALIYUN_REGION_ID=cn-hangzhou
 ALIYUN_OCR_ENDPOINT=ocr-api.cn-hangzhou.aliyuncs.com
 ALIYUN_ACCESS_KEY_ID=xxx
@@ -86,6 +92,18 @@ npm run dev:web
 - `GET /api/invoices` 获取发票列表
 - `GET /api/invoices/types` 获取可选发票类型
 - `GET /api/invoices/export` 导出 xlsx 报表
+
+## 目录批量导入（高费用风险）
+
+`npm run import:dir` 会对目录内文件逐个调用 OCR。为避免误触发高额账单，默认已加保护，需同时满足：
+
+1. 设置环境变量 `ALLOW_BULK_OCR_IMPORT=true`
+2. 显式传入目录参数，例如：
+
+```bash
+cd server
+ALLOW_BULK_OCR_IMPORT=true npm run import:dir -- /absolute/path/to/invoices
+```
 
 ## 日志定位
 

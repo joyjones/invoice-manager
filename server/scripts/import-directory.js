@@ -8,7 +8,20 @@ import { addProcessResult, ensureDataStore, getStoreStats, resetBusinessData } f
 dotenv.config();
 ensureDataStore();
 
-const targetDir = process.argv[2] || '/mnt/d/NutFiles/我的坚果云/发票/任静案例';
+const allowBulkImport = `${process.env.ALLOW_BULK_OCR_IMPORT || ''}`.trim().toLowerCase() === 'true';
+if (!allowBulkImport) {
+  console.error(
+    '已阻止目录全量 OCR 导入。请先设置 ALLOW_BULK_OCR_IMPORT=true 后再执行，避免误触发高额费用。',
+  );
+  process.exit(1);
+}
+
+const targetDir = process.argv[2];
+if (!targetDir) {
+  console.error('缺少目录参数。示例: npm run import:dir -- /absolute/path/to/invoices');
+  process.exit(1);
+}
+
 const rootDir = path.resolve(targetDir);
 
 if (!fs.existsSync(rootDir) || !fs.statSync(rootDir).isDirectory()) {
